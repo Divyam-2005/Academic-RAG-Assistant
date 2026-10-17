@@ -1,0 +1,4 @@
+.env
+__pycache__/
+gate_ml_faiss_index/
+*.pdf
