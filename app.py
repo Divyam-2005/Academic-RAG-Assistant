@@ -1,4 +1,5 @@
 import os
+import re
 import tempfile
 import streamlit as st
 from dotenv import load_dotenv
@@ -102,6 +103,21 @@ if process_button:
             st.session_state.vectorstore = FAISS.from_documents(chunks, embeddings)
             st.sidebar.success(f"Processed {len(all_docs)} pages into {len(chunks)} chunks!")
 
+def fix_latex_delimiters(text: str) -> str:
+    # Convert standard LaTeX block math \[ ... \] to $$ ... $$
+    text = re.sub(r'\\\[(.*?)\\\]', r'$$\1$$', text, flags=re.DOTALL)
+    
+    # Convert standard LaTeX inline math \( ... \) to $ ... $
+    text = re.sub(r'\\\((.*?)\\\)', r'$\1$', text, flags=re.DOTALL)
+    
+    # Fix instances where the model outputs literal [ ... ] containing LaTeX commands
+    text = re.sub(r'(?<!\w)\[\s*(\\[a-zA-Z]+.*?)\s*\]', r'$$\1$$', text, flags=re.DOTALL)
+    
+    # Fix instances where the model outputs literal ( ... ) containing LaTeX commands
+    text = re.sub(r'(?<!\w)\(\s*(\\[a-zA-Z]+.*?)\s*\)', r'$\1$', text)
+    
+    return text
+
 # --- 5. Chat Interface ---
 if "messages" not in st.session_state:
     st.session_state.messages = [
@@ -145,6 +161,7 @@ if user_query := st.chat_input("Ask a question about your uploaded documents..."
                     "question": user_query
                 })
 
+                answer = fix_latex_delimiters(answer)
                 st.write(answer)
                 st.session_state.messages.append({"role": "assistant", "content": answer})
 
