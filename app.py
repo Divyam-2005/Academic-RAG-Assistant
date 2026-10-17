@@ -104,19 +104,43 @@ if process_button:
             st.sidebar.success(f"Processed {len(all_docs)} pages into {len(chunks)} chunks!")
 
 def fix_latex_delimiters(text: str) -> str:
-    # Convert standard LaTeX block math \[ ... \] to $$ ... $$
-    text = re.sub(r'\\\[(.*?)\\\]', r'$$\1$$', text, flags=re.DOTALL)
+    # 1. Convert standard LaTeX block math \[ ... \] to $$ ... $$
+    text = re.sub(r'\\\[\s*(.*?)\s*\\\]', r'\n$$\1$$\n', text, flags=re.DOTALL)
     
-    # Convert standard LaTeX inline math \( ... \) to $ ... $
-    text = re.sub(r'\\\((.*?)\\\)', r'$\1$', text, flags=re.DOTALL)
+    # 2. Convert standard LaTeX inline math \( ... \) to $ ... $
+    text = re.sub(r'\\\(\s*(.*?)\s*\\\)', r'$\1$', text, flags=re.DOTALL)
     
-    # Fix instances where the model outputs literal [ ... ] containing LaTeX commands
-    text = re.sub(r'(?<!\w)\[\s*(\\[a-zA-Z]+.*?)\s*\]', r'$$\1$$', text, flags=re.DOTALL)
+    # 3. Fix literal bracketed math [ \command ... ] to $$ \command ... $$
+    text = re.sub(r'(?<!\w)\[\s*(\\[a-zA-Z]+.*?)\s*\]', r'\n$$\1$$\n', text, flags=re.DOTALL)
     
-    # Fix instances where the model outputs literal ( ... ) containing LaTeX commands
+    # 4. Fix literal parenthesized math ( \command ... ) to $ \command ... $
     text = re.sub(r'(?<!\w)\(\s*(\\[a-zA-Z]+.*?)\s*\)', r'$\1$', text)
     
-    return text
+    # 5. Fix isolated raw LaTeX lines and table cells missing delimiters
+    lines = text.split('\n')
+    fixed_lines = []
+    for line in lines:
+        stripped = line.strip()
+        
+        # Wrap standalone lines starting with raw LaTeX commands in $$ ... $$
+        if re.match(r'^\\(mathcal|mathbb|mathbf|mathrm|cfrac|frac|sum|prod|int|gamma|alpha|beta|delta|theta|lambda|sigma)\b', stripped) and '$' not in line:
+            line = f"$${stripped}$$"
+            
+        # Fix table cells containing LaTeX commands with missing or broken $ delimiters
+        elif '|' in line:
+            parts = line.split('|')
+            new_parts = []
+            for part in parts:
+                p_strip = part.strip()
+                if re.search(r'\\[a-zA-Z]+', p_strip) and (p_strip.count('$') % 2 != 0 or '$' not in p_strip):
+                    clean_cell = p_strip.replace('$', '')
+                    p_strip = f"${clean_cell}$"
+                new_parts.append(p_strip)
+            line = ' | '.join(new_parts)
+            
+        fixed_lines.append(line)
+        
+    return '\n'.join(fixed_lines)
 
 # --- 5. Chat Interface ---
 if "messages" not in st.session_state:
@@ -151,9 +175,21 @@ if user_query := st.chat_input("Ask a question about your uploaded documents..."
                     return "\n\n".join(doc.page_content for doc in docs)
 
                 prompt = ChatPromptTemplate.from_messages([
-                    ("system", "You are an expert academic research assistant.\nUse the provided context to answer the question with mathematical precision.\nIf context is missing, state clearly what is known.\n\nContext:\n{context}"),
-                    ("human", "{question}")
-                ])
+    ("system", (
+        "You are an expert academic research assistant.\n"
+        "Use the provided context to answer the question with mathematical precision.\n\n"
+        "STRICT LATEX FORMATTING RULES:\n"
+        "1. ALL mathematical expressions, variables, sets, and equations MUST be wrapped in math delimiters.\n"
+        "2. Wrap inline math in single dollar signs $ ... $ (e.g., $C > 0$, $\\mathbf{x} \\in \\mathbb{R}^d$).\n"
+        "3. Wrap standalone block equations in double dollar signs $$ ... $$ on their own lines.\n"
+        "4. NEVER output raw LaTeX commands (like \\mathcal, \\mathbb, \\mathbf, \\gamma, \\frac) outside $ or $$.\n"
+        "5. Inside Markdown tables, wrap the ENTIRE formula in $ ... $ (e.g., | Polynomial | $K(\\mathbf{x}, \\mathbf{z}) = \\gamma \\mathbf{x}^{\\top}\\mathbf{z}+r^d$ |).\n"
+        "6. DO NOT use \\( ... \\) or \\[ ... \\]. ONLY use $ and $$.\n\n"
+        "If context is missing, state clearly what is known.\n\n"
+        "Context:\n{context}"
+    )),
+    ("human", "{question}")
+])
 
                 chain = prompt | llm | StrOutputParser()
                 answer = chain.invoke({
