@@ -16,7 +16,7 @@ st.set_page_config(page_title="Academic RAG Assistant", layout="wide")
 st.title("📚 Academic RAG Assistant")
 st.caption("Upload technical textbooks or research papers and chat with them using local embeddings & Groq LLM.")
 
-# --- Sidebar: Configuration & Document Management ---
+# --- Sidebar Configuration ---
 with st.sidebar:
     st.header("⚙️ Configuration")
     groq_api_key = st.text_input("Groq API Key:", type="password", help="Get your API key from https://console.groq.com/")
@@ -38,64 +38,65 @@ with st.sidebar:
     uploaded_files = st.file_uploader("Upload PDF files", type=["pdf"], accept_multiple_files=True)
     build_button = st.button("Build / Update Vector Store", type="primary")
 
-# --- Initialize Embeddings (Cached for Performance) ---
+# --- Initialize Embeddings ---
 @st.cache_resource
 def load_embeddings():
     return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
 embeddings = load_embeddings()
 
-# --- Helper Function: Tokenized LaTeX Sanitizer ---
+# --- Robust LaTeX Sanitizer Pipeline ---
 def fix_latex_delimiters(text: str) -> str:
     if not text:
         return text
 
-    # 1. Standardize standard LaTeX block and inline math delimiters
+    # Step 1: Fix escaped ampersands inside alignment environments (\& -> &)
+    text = re.sub(
+        r'\\begin\{([a-zA-Z]+)\}(.*?)\\end\{\1\}',
+        lambda m: f"\\begin{{{m.group(1)}}}{m.group(2).replace(r'\&', '&')}\\end{{{m.group(1)}}}",
+        text,
+        flags=re.DOTALL
+    )
+
+    # Step 2: Standardize bracket delimiters [ ] and \( \)
     text = re.sub(r'\\\[\s*(.*?)\s*\\\]', r'\n$$\1$$\n', text, flags=re.DOTALL)
     text = re.sub(r'\\\(\s*(.*?)\s*\\\)', r'$\1$', text, flags=re.DOTALL)
 
-    # 2. Fix multi-line environments (\begin{aligned} ... \end{aligned})
-    def sanitize_env(match):
-        env_content = match.group(0)
-        clean_content = env_content.replace('$$', '').strip()
-        return f"\n$$\n{clean_content}\n$$\n"
+    # Step 3: Clean and wrap multi-line environments strictly in $$...$$
+    def wrap_environment(match):
+        env_str = match.group(0)
+        clean_env = re.sub(r'\$+', '', env_str).strip()
+        return f"\n$$\n{clean_env}\n$$\n"
 
-    text = re.sub(r'\\begin\{[a-zA-Z]+\}.*?\\end\{[a-zA-Z]+\}', sanitize_env, text, flags=re.DOTALL)
+    text = re.sub(r'\\begin\{[a-zA-Z]+\}.*?\\end\{[a-zA-Z]+\}', wrap_environment, text, flags=re.DOTALL)
 
-    # 3. Clean empty/nested dollar signs
-    text = re.sub(r'\$\$\s*\$\$', '', text)
+    # Step 4: Protect existing valid math blocks using tokens
+    placeholders = []
+    def mask_math(match):
+        placeholders.append(match.group(0))
+        return f"___MATH_TOKEN_{len(placeholders)-1}___"
 
-    # 4. Tokenize and protect already-valid math blocks ($$...$$ and $...$)
-    math_placeholders = []
-    def protect_math(match):
-        math_placeholders.append(match.group(0))
-        return f"___MATH_PLACEHOLDER_{len(math_placeholders)-1}___"
+    text = re.sub(r'\$\$.*?\$\$', mask_math, text, flags=re.DOTALL)
+    text = re.sub(r'\$.*?\$', mask_math, text)
 
-    # Protect block math first, then inline math
-    text = re.sub(r'\$\$.*?\$\$', protect_math, text, flags=re.DOTALL)
-    text = re.sub(r'\$.*?\$', protect_math, text)
-
-    # 5. Process remaining unwrapped text lines
+    # Step 5: Process unmasked lines containing raw LaTeX commands
     lines = text.split('\n')
     fixed_lines = []
 
     for line in lines:
         stripped = line.strip()
-        
-        # Skip empty lines, placeholders, or code blocks
-        if not stripped or '___MATH_PLACEHOLDER_' in line or stripped.startswith('```'):
+        if not stripped or '___MATH_TOKEN_' in line or stripped.startswith('```'):
             fixed_lines.append(line)
             continue
 
-        # If line contains raw LaTeX commands that were missed by the LLM
         if re.search(r'\\[a-zA-Z]+', stripped):
-            if stripped.startswith(('-', '*', '1.', '2.', '3.', '4.', '5.', '6.')):
+            if re.match(r'^[\-\*\d\.]+\s+', stripped):
                 if ':' in line:
                     prefix, eq = line.split(':', 1)
                     line = f"{prefix}: ${eq.strip()}$"
                 else:
                     line = f"${line}$"
-            elif '=' in stripped or r'\min' in stripped or r'\sum' in stripped or r'\max' in stripped or r'\frac' in stripped:
+            elif any(kw in stripped for kw in ['=', r'\min', r'\max', r'\sum', r'\prod', r'\int', r'\frac']):
                 line = f"$${stripped}$$"
             else:
                 line = f"${stripped}$"
@@ -104,11 +105,11 @@ def fix_latex_delimiters(text: str) -> str:
 
     text = '\n'.join(fixed_lines)
 
-    # 6. Restore protected math blocks
-    for i, block in enumerate(math_placeholders):
-        text = text.replace(f"___MATH_PLACEHOLDER_{i}___", block)
+    # Step 6: Restore protected math tokens
+    for i, token in enumerate(placeholders):
+        text = text.replace(f"___MATH_TOKEN_{i}___", token)
 
-    # Clean any accidental double-wrapping
+    # Step 7: Final cleanup of duplicate delimiters
     text = re.sub(r'\$\$\s*\$\$', '', text)
     return text
 
@@ -178,12 +179,11 @@ if user_query := st.chat_input("Ask a question about your uploaded documents..."
                         "You are an expert academic research assistant.\n"
                         "Use the provided context to answer the question with mathematical precision.\n\n"
                         "STRICT LATEX FORMATTING RULES:\n"
-                        "1. ALL mathematical expressions, variables, sets, and equations MUST be wrapped in math delimiters.\n"
-                        "2. Wrap inline math in single dollar signs $...$ (e.g. $w \\in \\mathbb{{R}}^d$).\n"
+                        "1. ALL mathematical expressions MUST be wrapped in math delimiters.\n"
+                        "2. Wrap inline math in single dollar signs $...$.\n"
                         "3. Wrap standalone block equations in double dollar signs $$...$$ on new lines.\n"
-                        "4. For multi-line aligned equations, wrap the ENTIRE \\begin{{aligned}} ... \\end{{aligned}} block in a single pair of $$ ... $$. DO NOT place $$ inside aligned environments.\n"
-                        "5. NEVER output raw LaTeX commands (like \\mathcal, \\mathbb, \\mathbf, \\gamma, \\frac) outside $ or $$.\n\n"
-                        "If context is missing, state clearly what is known.\n\n"
+                        "4. For multi-line aligned equations, wrap the ENTIRE \\begin{{aligned}} ... \\end{{aligned}} block in $$ ... $$. DO NOT use \\& inside aligned blocks; use &.\n"
+                        "5. NEVER output raw LaTeX commands outside $ or $$.\n\n"
                         "Context:\n{context}"
                     )),
                     ("human", "{question}")
@@ -195,13 +195,11 @@ if user_query := st.chat_input("Ask a question about your uploaded documents..."
                     "question": user_query
                 })
 
-                # Sanitize LaTeX formatting for Streamlit
                 clean_answer = fix_latex_delimiters(answer)
 
                 st.write(clean_answer)
                 st.session_state.messages.append({"role": "assistant", "content": clean_answer})
 
-                # Display Citations
                 if retrieved_docs:
                     with st.expander("📌 Source Metadata Citations"):
                         for i, doc in enumerate(retrieved_docs, 1):
