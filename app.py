@@ -45,56 +45,67 @@ def load_embeddings():
 
 embeddings = load_embeddings()
 
-# --- Helper Function: Robust LaTeX Formatting ---
+# --- Helper Function: Tokenized LaTeX Sanitizer ---
 def fix_latex_delimiters(text: str) -> str:
     if not text:
         return text
 
-    # 1. Convert standard LaTeX block math [ ... ] to $$...$$
+    # 1. Standardize standard LaTeX block and inline math delimiters
     text = re.sub(r'\\\[\s*(.*?)\s*\\\]', r'\n$$\1$$\n', text, flags=re.DOTALL)
-    
-    # 2. Convert standard LaTeX inline math \(...\) to $...$
-    text = re.sub(r'\\\(\s*(.*?)\s*\\\)', r'$\1$', text, flags=re.DOTALL)
-    
-    # 3. Convert literal bracket math [ \command ... ] to $$\command ...$$
-    text = re.sub(r'(?<!\w)\[\s*(\\[a-zA-Z]+.*?)\s*\]', r'\n\$\$\1$$\n', text, flags=re.DOTALL)      # 4. Clean up consecutive dollar signs text = re.sub(r'\${3,}', '$$', text)
+    text = re.sub(r'\\\(\s*(.*?)\s*\\\)', r'\$\1$', text, flags=re.DOTALL)      # 2. Fix multi-line environments (\begin{aligned} ... \end{aligned}) # Remove any internal $\$ inside the environment and wrap the entire block ONCE in $$ def sanitize_env(match): env_content = match.group(0) clean_content = env_content.replace('$$', '').strip()
+        return f"\n$$\n{clean_content}\n$$\n"
 
-    # 5. Process line by line to handle unwrapped commands cleanly
+    text = re.sub(r'\\begin\{[a-zA-Z]+\}.*?\\end\{[a-zA-Z]+\}', sanitize_env, text, flags=re.DOTALL)
+
+    # 3. Clean empty/nested dollar signs
+    text = re.sub(r'\$\$\s*\$\$', '', text)
+
+    # 4. Tokenize and protect already-valid math blocks ($$...$$ and $...$)
+    math_placeholders = []
+    def protect_math(match):
+        math_placeholders.append(match.group(0))
+        return f"___MATH_PLACEHOLDER_{len(math_placeholders)-1}___"
+
+    # Protect block math first, then inline math
+    text = re.sub(r'\$\$.*?\$\$', protect_math, text, flags=re.DOTALL)
+    text = re.sub(r'\$.*?\$', protect_math, text)
+
+    # 5. Process remaining unwrapped text lines
     lines = text.split('\n')
     fixed_lines = []
 
     for line in lines:
         stripped = line.strip()
         
-        # Skip code blocks or empty lines
-        if not stripped or stripped.startswith('```'):
+        # Skip empty lines, placeholders, or code blocks
+        if not stripped or '___MATH_PLACEHOLDER_' in line or stripped.startswith('```'):
             fixed_lines.append(line)
             continue
 
-        # Detect raw LaTeX commands
+        # If line contains raw LaTeX commands that were missed by the LLM
         if re.search(r'\\[a-zA-Z]+', stripped):
-            dollar_count = stripped.count('$')
-            
-            # If no dollar signs are present on a line with LaTeX math
-            if dollar_count == 0:
-                if stripped.startswith(('-', '*', '1.', '2.', '3.', '4.', '5.')):
-                    if ':' in line:
-                        prefix, eq = line.split(':', 1)
-                        line = f"{prefix}: ${eq.strip()}$"
-                    else:
-                        line = f"${line}$"
-                elif stripped.startswith('\\') or '=' in stripped or r'\min' in stripped or r'\sum' in stripped:
-                    line = f"$${stripped}$$"
+            if stripped.startswith(('-', '*', '1.', '2.', '3.', '4.', '5.', '6.')):
+                if ':' in line:
+                    prefix, eq = line.split(':', 1)
+                    line = f"{prefix}: ${eq.strip()}$"
                 else:
-                    line = f"${stripped}$"
-            # If dollar sign counts are odd/mangled, clean and wrap entire string
-            elif dollar_count % 2 != 0:
-                clean = stripped.replace('$', '')
-                line = f"$${clean}$$"
+                    line = f"${line}$"
+            elif '=' in stripped or r'\min' in stripped or r'\sum' in stripped or r'\max' in stripped or r'\frac' in stripped:
+                line = f"$${stripped}$$"
+            else:
+                line = f"${stripped}$"
 
         fixed_lines.append(line)
 
-    return '\n'.join(fixed_lines)
+    text = '\n'.join(fixed_lines)
+
+    # 6. Restore protected math blocks
+    for i, block in enumerate(math_placeholders):
+        text = text.replace(f"___MATH_PLACEHOLDER_{i}___", block)
+
+    # Clean any accidental double-wrapping
+    text = re.sub(r'\$\$\s*\$\$', '', text)
+    return text
 
 # --- Vector Store Processing ---
 if build_button:
@@ -165,8 +176,8 @@ if user_query := st.chat_input("Ask a question about your uploaded documents..."
                         "1. ALL mathematical expressions, variables, sets, and equations MUST be wrapped in math delimiters.\n"
                         "2. Wrap inline math in single dollar signs $...$ (e.g. $w \\in \\mathbb{{R}}^d$).\n"
                         "3. Wrap standalone block equations in double dollar signs $$...$$ on new lines.\n"
-                        "4. NEVER output raw LaTeX commands (like \\mathcal, \\mathbb, \\mathbf, \\gamma, \\frac) outside $ or $$.\n"
-                        "5. Inside Markdown tables, wrap the ENTIRE formula in $...$.\n\n"
+                        "4. For multi-line aligned equations, wrap the ENTIRE \\begin{{aligned}} ... \\end{{aligned}} block in a single pair of $$ ... $$. DO NOT place $$ inside aligned environments.\n"
+                        "5. NEVER output raw LaTeX commands (like \\mathcal, \\mathbb, \\mathbf, \\gamma, \\frac) outside $ or $$.\n\n"
                         "If context is missing, state clearly what is known.\n\n"
                         "Context:\n{context}"
                     )),
@@ -179,7 +190,7 @@ if user_query := st.chat_input("Ask a question about your uploaded documents..."
                     "question": user_query
                 })
 
-                # Post-process response to ensure valid Streamlit KaTeX formatting
+                # Sanitize LaTeX formatting for Streamlit
                 clean_answer = fix_latex_delimiters(answer)
 
                 st.write(clean_answer)
