@@ -52,7 +52,12 @@ def fix_latex_delimiters(text: str) -> str:
 
     # 1. Standardize standard LaTeX block and inline math delimiters
     text = re.sub(r'\\\[\s*(.*?)\s*\\\]', r'\n$$\1$$\n', text, flags=re.DOTALL)
-    text = re.sub(r'\\\(\s*(.*?)\s*\\\)', r'\$\1$', text, flags=re.DOTALL)      # 2. Fix multi-line environments (\begin{aligned} ... \end{aligned}) # Remove any internal $\$ inside the environment and wrap the entire block ONCE in $$ def sanitize_env(match): env_content = match.group(0) clean_content = env_content.replace('$$', '').strip()
+    text = re.sub(r'\\\(\s*(.*?)\s*\\\)', r'$\1$', text, flags=re.DOTALL)
+
+    # 2. Fix multi-line environments (\begin{aligned} ... \end{aligned})
+    def sanitize_env(match):
+        env_content = match.group(0)
+        clean_content = env_content.replace('$$', '').strip()
         return f"\n$$\n{clean_content}\n$$\n"
 
     text = re.sub(r'\\begin\{[a-zA-Z]+\}.*?\\end\{[a-zA-Z]+\}', sanitize_env, text, flags=re.DOTALL)
