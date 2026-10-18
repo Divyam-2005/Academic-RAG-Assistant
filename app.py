@@ -45,72 +45,39 @@ def load_embeddings():
 
 embeddings = load_embeddings()
 
-# --- Robust LaTeX Sanitizer Pipeline ---
+# --- Ultimate LaTeX Sanitizer Pipeline ---
 def fix_latex_delimiters(text: str) -> str:
     if not text:
         return text
 
-    # Step 1: Fix escaped ampersands inside alignment environments (\& -> &)
-    text = re.sub(
-        r'\\begin\{([a-zA-Z]+)\}(.*?)\\end\{\1\}',
-        lambda m: f"\\begin{{{m.group(1)}}}{m.group(2).replace(r'\&', '&')}\\end{{{m.group(1)}}}",
-        text,
-        flags=re.DOTALL
-    )
+    # 1. Safely replace \( \) and \[ \] with $ and $$
+    # Negative lookbehind (?<!\\) ensures we DO NOT break \\[4pt] (LaTeX newlines)
+    text = re.sub(r'(?<!\\)\\\(', '$', text)
+    text = re.sub(r'(?<!\\)\\\)', '$', text)
+    text = re.sub(r'(?<!\\)\\\[', '$$', text)
+    text = re.sub(r'(?<!\\)\\\]', '$$', text)
 
-    # Step 2: Standardize bracket delimiters [ ] and \( \)
-    text = re.sub(r'\\\[\s*(.*?)\s*\\\]', r'\n$$\1$$\n', text, flags=re.DOTALL)
-    text = re.sub(r'\\\(\s*(.*?)\s*\\\)', r'$\1$', text, flags=re.DOTALL)
+    # 2. Fix escaped ampersands inside LaTeX (KaTeX strictly uses & for alignment, not \&)
+    text = text.replace(r'\&', '&')
 
-    # Step 3: Clean and wrap multi-line environments strictly in $$...$$
-    def wrap_environment(match):
-        env_str = match.group(0)
-        clean_env = re.sub(r'\$+', '', env_str).strip()
-        return f"\n$$\n{clean_env}\n$$\n"
+    # 3. Strip existing $$ around environments so we don't double-wrap them
+    text = re.sub(r'\$\$\s*\\begin', r'\\begin', text)
+    text = re.sub(r'\\end\{([a-zA-Z*]+)\}\s*\$\$', r'\\end{\1}', text)
 
-    text = re.sub(r'\\begin\{[a-zA-Z]+\}.*?\\end\{[a-zA-Z]+\}', wrap_environment, text, flags=re.DOTALL)
+    # 4. Find all \begin{...} ... \end{...} blocks, clean internal $, and wrap cleanly in $$
+    def sanitize_env(match):
+        env_type = match.group(1)
+        env_body = match.group(2)
+        # Remove any stray $ hallucinated inside the environment
+        clean_body = env_body.replace('$', '')
+        # Return properly wrapped block with safety newlines
+        return f"\n$$\n\\begin{{{env_type}}}{clean_body}\\end{{{env_type}}}\n$$\n"
 
-    # Step 4: Protect existing valid math blocks using tokens
-    placeholders = []
-    def mask_math(match):
-        placeholders.append(match.group(0))
-        return f"___MATH_TOKEN_{len(placeholders)-1}___"
+    text = re.sub(r'\\begin\{([a-zA-Z*]+)\}(.*?)\\end\{\1\}', sanitize_env, text, flags=re.DOTALL)
 
-    text = re.sub(r'\$\$.*?\$\$', mask_math, text, flags=re.DOTALL)
-    text = re.sub(r'\$.*?\$', mask_math, text)
+    # 5. Clean up any accidental duplicate dollar signs (e.g., $$$ -> $$)
+    text = re.sub(r'\${3,}', '$$', text)
 
-    # Step 5: Process unmasked lines containing raw LaTeX commands
-    lines = text.split('\n')
-    fixed_lines = []
-
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or '___MATH_TOKEN_' in line or stripped.startswith('```'):
-            fixed_lines.append(line)
-            continue
-
-        if re.search(r'\\[a-zA-Z]+', stripped):
-            if re.match(r'^[\-\*\d\.]+\s+', stripped):
-                if ':' in line:
-                    prefix, eq = line.split(':', 1)
-                    line = f"{prefix}: ${eq.strip()}$"
-                else:
-                    line = f"${line}$"
-            elif any(kw in stripped for kw in ['=', r'\min', r'\max', r'\sum', r'\prod', r'\int', r'\frac']):
-                line = f"$${stripped}$$"
-            else:
-                line = f"${stripped}$"
-
-        fixed_lines.append(line)
-
-    text = '\n'.join(fixed_lines)
-
-    # Step 6: Restore protected math tokens
-    for i, token in enumerate(placeholders):
-        text = text.replace(f"___MATH_TOKEN_{i}___", token)
-
-    # Step 7: Final cleanup of duplicate delimiters
-    text = re.sub(r'\$\$\s*\$\$', '', text)
     return text
 
 # --- Vector Store Processing ---
@@ -174,16 +141,18 @@ if user_query := st.chat_input("Ask a question about your uploaded documents..."
                 def format_docs(docs):
                     return "\n\n".join(doc.page_content for doc in docs)
 
+                # NEW STRICT PROMPT
                 prompt = ChatPromptTemplate.from_messages([
                     ("system", (
                         "You are an expert academic research assistant.\n"
                         "Use the provided context to answer the question with mathematical precision.\n\n"
-                        "STRICT LATEX FORMATTING RULES:\n"
-                        "1. ALL mathematical expressions MUST be wrapped in math delimiters.\n"
-                        "2. Wrap inline math in single dollar signs $...$.\n"
-                        "3. Wrap standalone block equations in double dollar signs $$...$$ on new lines.\n"
-                        "4. For multi-line aligned equations, wrap the ENTIRE \\begin{{aligned}} ... \\end{{aligned}} block in $$ ... $$. DO NOT use \\& inside aligned blocks; use &.\n"
-                        "5. NEVER output raw LaTeX commands outside $ or $$.\n\n"
+                        "CRITICAL LATEX FORMATTING INSTRUCTIONS FOR STREAMLIT:\n"
+                        "1. ALWAYS use $ for inline math (e.g., $x = 2$).\n"
+                        "2. ALWAYS use $$ for block/display math (e.g., $$y = mx + b$$).\n"
+                        "3. For multi-line equations, ALWAYS use \\begin{{aligned}} ... \\end{{aligned}} wrapped strictly in $$.\n"
+                        "4. NEVER place $ or $$ inside an aligned environment.\n"
+                        "5. NEVER use \\( or \\) or \\[ or \\]. ONLY use $ and $$.\n"
+                        "6. NEVER use \\& for alignment, use &.\n\n"
                         "Context:\n{context}"
                     )),
                     ("human", "{question}")
